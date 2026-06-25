@@ -1,94 +1,75 @@
-const SYSTEM_PROMPT = `You convert notes, articles, or syllabus text into a structured mind map.
+import pdfParse from "pdf-parse";
+import { ocrPdfBuffer } from "../../../lib/ocr";
 
-Return ONLY valid JSON, no markdown fences, no preamble, matching this exact shape:
-
-{
-  "title": "Short root topic (max 4 words)",
-  "children": [
-    {
-      "label": "Main branch (max 5 words)",
-      "children": [
-        {
-          "label": "Sub-point (max 6 words)",
-          "children": [
-            { "label": "Detail (max 8 words)", "children": [] }
-          ]
-        }
-      ]
-    }
-  ]
-}
-
-Rules:
-- Max depth: 4 levels (root + 3).
-- Max 6 main branches off the root.
-- Max 5 children per node.
-- Keep every label short and scannable, like a mind map node, not a sentence.
-- Do not lose important concepts — compress wording, not meaning.
-- Output strictly valid JSON. No trailing commas, no comments.`;
+export const runtime = "nodejs";
+export const maxDuration = 60; // OCR can take a bit longer than typical requests
 
 export async function POST(req) {
   try {
-    const { text } = await req.json();
+    const formData = await req.formData();
+    const file = formData.get("file");
 
-    if (!text || text.trim().length < 20) {
+    if (!file) {
+      return Response.json({ error: "No file received." }, { status: 400 });
+    }
+
+    if (file.type !== "application/pdf") {
+      return Response.json({ error: "Please upload a PDF file." }, { status: 400 });
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    let parsed;
+    try {
+      parsed = await pdfParse(buffer);
+    } catch (e) {
       return Response.json(
-        { error: "Please provide a bit more text — at least a few sentences." },
+        { error: "Couldn't read that PDF. It may be corrupted or password protected." },
         { status: 400 }
       );
     }
 
-    const truncated = text.slice(0, 15000); // keep prompt within safe bounds
+    const directText = (parsed.text || "").trim();
+    const pageCount = parsed.numpages || 1;
+    const avgCharsPerPage = directText.length / pageCount;
 
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) {
+    // Case 1: typed PDF with a real text layer — use it directly, no OCR needed.
+    if (avgCharsPerPage >= 80) {
+      return Response.json({ text: directText });
+    }
+
+    // Case 2: no real text layer — this is photos/scans stitched into a PDF.
+    // Run OCR and use confidence to tell printed text apart from handwriting.
+    let ocrResult;
+    try {
+      ocrResult = await ocrPdfBuffer(buffer);
+    } catch (e) {
       return Response.json(
-        { error: "Server is missing GROQ_API_KEY. Add it in your hosting environment variables." },
+        { error: "Couldn't process this PDF's pages. Try a different file." },
         { status: 500 }
       );
     }
 
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        max_tokens: 2000,
-        temperature: 0.4,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: truncated },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
+    if (!ocrResult.text || ocrResult.text.length < 40) {
       return Response.json(
-        { error: `AI request failed: ${errText.slice(0, 200)}` },
-        { status: 502 }
+        { error: "Couldn't find readable text in this PDF. Make sure pages are clear and in focus." },
+        { status: 422 }
       );
     }
 
-    const data = await response.json();
-    const raw = data.choices?.[0]?.message?.content ?? "";
-    const cleaned = raw.replace(/```json|```/g, "").trim();
-
-    let tree;
-    try {
-      tree = JSON.parse(cleaned);
-    } catch (e) {
+    if (!ocrResult.isLikelyPrinted) {
       return Response.json(
-        { error: "Couldn't parse the AI's response. Try again." },
-        { status: 502 }
+        {
+          error:
+            "This looks like handwriting — we can only read printed or typed text right now.",
+        },
+        { status: 422 }
       );
     }
 
-    return Response.json({ tree });
+    return Response.json({ text: ocrResult.text });
   } catch (err) {
-    return Response.json({ error: "Something went wrong. Please try again." }, { status: 500 });
+    return Response.json({ error: "Something went wrong reading the PDF." }, { status: 500 });
   }
 }
