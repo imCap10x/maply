@@ -8,6 +8,36 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [tree, setTree] = useState(null);
   const [error, setError] = useState("");
+  const [extracting, setExtracting] = useState(false);
+  const [fileName, setFileName] = useState("");
+
+  async function handleFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setError("");
+    setFileName(file.name);
+    setExtracting(true);
+    setText("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/extract-pdf", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Couldn't read that PDF.");
+        setFileName("");
+      } else {
+        setText(data.text);
+      }
+    } catch (e) {
+      setError("Network error while reading the PDF. Try again.");
+      setFileName("");
+    } finally {
+      setExtracting(false);
+    }
+  }
 
   async function handleGenerate() {
     setError("");
@@ -69,6 +99,40 @@ export default function Home() {
       {/* Input */}
       {!tree && (
         <section>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              marginBottom: 12,
+            }}
+          >
+            <label
+              htmlFor="pdf-upload"
+              style={{
+                border: "1px solid var(--line)",
+                borderRadius: 8,
+                padding: "10px 16px",
+                fontSize: 14,
+                cursor: "pointer",
+                color: "var(--ink)",
+                background: "var(--paper)",
+              }}
+            >
+              {extracting ? "Reading PDF (this can take a moment for scanned pages)..." : "Upload a PDF"}
+            </label>
+            <input
+              id="pdf-upload"
+              type="file"
+              accept="application/pdf"
+              onChange={handleFileChange}
+              style={{ display: "none" }}
+            />
+            {fileName && !extracting && (
+              <span style={{ fontSize: 13, color: "var(--ink-soft)" }}>{fileName}</span>
+            )}
+            <span style={{ fontSize: 13, color: "var(--ink-soft)" }}>— or paste text below</span>
+          </div>
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
